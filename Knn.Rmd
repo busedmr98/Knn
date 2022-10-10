@@ -1,0 +1,261 @@
+---
+title: "KNN Sınıflandırıcısı"
+date: "04/01/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Iris Uygulaması
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(psych)      #iris
+library(quantable)  #confusionMatrix
+library(class)      #knn (basic)
+library(caret)      #Cross validation/Model selection
+library(stargazer)  #Summary
+library(GGally)     #ggpairs
+library(tidyr)      #pivot_longer
+library(dplyr)      #mutate
+library(ISLR)       #Caravan
+```
+
+*Iris* veri seti 150 tane çiçeğin yaprak boyutlarını ifade eden 4 değişken ve bu çiçeklerin isimlerinden oluşur. 
+
+Aşağıda verinin dağılımlarını gösteren bir grafik ve tanımlayıcı istatistikleri yer alıyor.
+
+```{r message=FALSE, warning=FALSE}
+
+ggpairs(iris[,1:4], 
+        aes(color = iris$Species, 
+            pch = iris$Species,alpha=0.99),
+        progress=FALSE)
+```
+
+```{r}
+stargazer(iris, 
+          summary=TRUE, median=TRUE, flip=TRUE, 
+          type="text")
+```
+
+Burada önemli kısım çiçeklerin ölçülmüş özelliklerinin farklı boyutları ve standart sapmaları olması. 
+
+Bu ölçüleri aynı skalaya getirmezsek daha büyük ölçeklerdeki özelliklerin kullanılan uzaklık tipine bağlı olarak hesaplanan uzaklıklara daha büyük katkıda bulunmasını sağlarız. 
+
+Bu yüzden verinin standartlaştırılması önemlidir.
+
+
+## Verinin Eğitim-Test ayrımı ve Standartlaştırılması
+
+```{r}
+
+n <- floor(0.7*nrow(iris))
+set.seed(808)
+train_ind <- sample(nrow(iris), size = n, replace = FALSE)
+
+iris_scaled <- data.frame(scale(iris[,1:4]))
+
+train <- iris_scaled[train_ind,]
+test <- iris_scaled[-train_ind,]
+train.label <- iris[train_ind,5]
+test.label <- iris[-train_ind,5]
+```
+Bu aşamalar sonrası modeli kurmaya hazırız.
+
+
+## KNN Sınıflandırma Modeli
+
+Model tahminlemeyi başlatmak için k değerini kullanılan satır sayısının karekökü şeklinde alabiliriz.
+
+```{r}
+sqrt(n)
+```
+
+```{r knn1, echo=TRUE}
+iris_pred <- knn(train,test,train.label,k=10)
+
+cm <- confusionMatrix(iris_pred,test.label, mode="everything")
+
+cm
+```
+Bu sonuçlardan görüleceği üzere 45 sınıfın yanlızca 4'ü yanlış tanımlanmıştır. Tabi ki elimizdeki probleme göre bu 4 yanlışa hangi yönden baktığımız modelin iyi sonuç verip vermediğini değiştirir. 
+
+```{r}
+mean(cm$byClass[,"F1"])
+```
+F1 skorlarının ortalaması kesinlik kriterine nazaran modelleri karşılaştırmak için daha sık kullanılan bir ölçüttür.
+
+## K-Fold Cross Validation Yöntemi
+
+K'yı belirlemek aslında daha önce deneyimlediğimiz model seçim aşamasını temsil eder. Tek bir K değeriyle model kurup işimiz bitmez. Farklı K değerlerinde kesinliğe, F1'e, Kappa'ya veya başka bir ölçüte ne olduğunu bilmek en iyi model arayışımızda bize önemli bilgiler verir.
+
+Hem istenilen ölçütü en büyükleyen, hem de modelin ezberlemesini önleyecek büyüklükte K değerlerini seçmek için çapraz doğrulama yöntemini kullanabiliriz.
+
+```{r warning=FALSE}
+train$Species <- train.label
+
+ctrl  <- trainControl(method  = "cv", number = 10, summaryFunction = multiClassSummary)
+
+set.seed(808)
+fit.cv <- train(Species ~ ., data = train, 
+                method = "knn", metric = "Mean_F1",
+                trControl = ctrl,
+                #preProcess = c("center","scale"),
+                tuneGrid = data.frame(k=1:50))
+```
+
+Çapraz doğrulamadaki mantık şöyle işler: 
+
+* Önceden ayırdığımız öğrenim seti 10 eşit boyutta parçaya bölünür.
+* Her set sırayla doğrulama seti, geri kalan setler de yeni öğrenim seti olarak tanımlanır. 
+* train() fonksiyonu içinde k değerini 1'den 50'ye kadar deneyeceğimiz için, her k değerinde 105/10 = 10 model tahmin edilir ve bu tahminlerin ortalama kesinlik, F1, vb. diğer değerleri doğrulama setleri yardımıyla hesaplanır. 
+* Metric olarak tanımladığımız istatistiği ortalamada en çoklayan model son model olarak seçilir.
+
+Son modelin hangisi olduğunu tanımladığımız fit.cv objesinin bestTune kısmına bakarak öğrenebiliriz.
+
+```{r}
+fit.cv$bestTune
+```
+
+K'nın 10 seçildiği model son model olarak seçilmiş. Farklı K değerlerinde farklı istatistiklerin nasıl değiştiğini plot fonksiyonuyla daha iyi görebiliriz.
+
+```{r}
+plot(fit.cv)
+```
+
+Genelde bir ölçütü en çoklayan bir sürü K değerine rastlanır. Algoritmanın ezbere karşı bu K değerleri arasında en büyüğünü seçtiği görülmektedir.
+
+```{r fig.height=10, fig.width=10, warning=FALSE}
+
+fit_long <- pivot_longer(fit.cv$results,2:23)
+
+fit_long <- pivot_longer(fit.cv$results,2:23) %>%
+  group_by(name) %>%
+  mutate(color = (max(value) == value))
+
+fit_long$label <- fit_long$color*fit_long$k
+fit_long$label[which(fit_long$label==0)]=NA
+
+ggplot(fit_long)+
+  geom_line(aes(k,value))+
+  geom_point(aes(k, value, color = color))+
+  facet_wrap(~name,scales="free")+
+  scale_color_manual(values = c("#00000000", "red"))+
+  geom_text(aes(k,value), label=fit_long$label,na.rm=TRUE,check_overlap=TRUE)+
+  theme(legend.position="none")
+```
+Bu grafikte de hesaplanan tüm ölçütlerin K'ya göre değişimleri, ve o ölçütleri en çoklayan K değerleri verilmiştir.
+
+Seçilen modeli son olarak test verisinin sonuçlarıyla karşılaştıracağız.
+
+```{r}
+pred <- predict(fit.cv,test)
+
+confusionMatrix(pred,test.label, mode = "everything")
+```
+Son modelimiz K değeri değişmediği için aynı sonucu vermiştir. Optimal K değeri her ölçüte göre, her zaman, karekök(n) ile aynı olmaz, burada görülen durum bir tesadüftür.
+
+Son olarak da başka bir veri setinde farklı bir ölçümü çoklamak için çalışalım.
+
+## Caravan Uygulaması
+
+PS: Notlar için Buse'ye teşekkürler.
+
+*Caravan* veri seti üzerinde KNN algoritması ile sınıf tahminlemesi için bir model kurulması
+
+Bu veri seti, 5.822 kişi için demografik özellikleri ölçen 85 tahmin ediciyi içermektedir. Bağımlı değişken, belirli bir bireyin bir karavan sigortası poliçesi satın alıp almadığını gösteren Purchase değişkenidir.
+
+```{r}
+attach(Caravan)
+sum(Purchase=="Yes")/sum(Purchase=="No")
+```
+* Bu veri setindeki kişilerin sadece %6'sı karavan sigorta satın almış.
+
+Verinin yine standartlaştırılıp eğitim-test olarak ayrılması söz konusu.
+
+```{r}
+standardized.X=scale(Caravan[,-86])
+
+n <- floor(nrow(Caravan)*0.7)
+set.seed(808)
+test <- sample(nrow(Caravan), size = n, replace = FALSE)
+
+train.X <- data.frame(standardized.X[test,])
+test.X <- data.frame(standardized.X[-test,])
+train.Y <- Caravan$Purchase[test]
+test.Y <- Caravan$Purchase[-test]
+
+knn.pred1 <- knn(train.X,test.X,train.Y,k=1)
+ 
+confusionMatrix(knn.pred1,test.Y, mode="everything")
+```
+
+
+Karavan poliçesi satın alan tahmini içinde gerçekten alanların oranı K=1 olarak başlatılan modelde %6.7 olarak gözlemlenebilir. 
+
+Veri setinden rastgele seçim yapsaydık ortalamada zaten seçtiğimiz insanların %6.3'ü satın alıyordu. 
+
+Bu değerin eğer karavan poliçesini satmak için potansiyel alıcıların evlerine satıcı gönderiyorsak maksimum derecede olması bizim giderlerimizi azaltacaktır.
+
+
+```{r echo=TRUE, warning=FALSE}
+train.X$Purchase <- train.Y
+
+ctrl  <- trainControl(method = "cv", number = 10, summaryFunction = multiClassSummary)
+
+set.seed(808)
+fit.cv <- train(Purchase ~ ., data = train.X, 
+                method = "knn", metric = "Neg_Pred_Value",
+                trControl = ctrl,
+                #preProcess = c("center","scale"),
+                tuneGrid = data.frame(k=5:15))
+```
+
+```{r}
+plot(fit.cv)
+plot(fit.cv,metric="Specificity")
+fit.cv$bestTune
+```
+* Model seçimine yakından bakacak olursak, Neg_Pred_Value değerinin önce 0.5'e çıkıp sonra 0'a düşmesi ve NaN (0/0) değerleri alması bize modelin yeterince iyi olmadığının sinyalini veriyor. 
+
+* Specificity değeri de K=1 olduğunda %6 civarındaydı, ve K arttıkça sıfıra doğru ilerlediği görülmekte.
+
+```{r}
+pred2 <- predict(fit.cv,test.X)
+confusionMatrix(pred2,test.Y, mode="everything")
+```
+
+Her ne kadar eğitim verisinde poliçe alan olarak tahmin edilenlerin içinde %50'ye yakını gerçekten satın almış olsa da, test verisindeki bir gözlem hariç tüm gözlemlerin satın almadığı tahmin edilmiştir. Gerçekte 103 kişi satın aldığına göre bu rakamlar modelin işe yarayan sonuçlar vermediğini gösteriyor.
+
+Bu durumda başka sınıflandırma yöntemlerine, mesela lojistik regresyona bakılabilir.
+
+## Lojistik Regresyon
+
+```{r}
+glm.fit <- glm(Purchase~.,data=Caravan ,family=binomial ,
+subset=-test)
+
+ glm.probs <- predict(glm.fit ,Caravan[-test,], type="response")
+ #plot(glm.probs,type="l")
+ glm.pred <- rep("No",1747)
+ glm.pred[glm.probs >.5] <- "Yes"
+ table(glm.pred ,test.Y)
+```
+* 0.5 eşiği yüksek K'lı KNN modeli çıktılarına benzer bir sonuç verdi. Bu eşiği 0.25'e düşürüp bir daha deneyelim.
+
+```{r}
+glm.pred <- rep("No",1747)
+glm.pred[glm.probs>.25] <- "Yes"
+confusionMatrix(as.factor(glm.pred),test.Y)
+```
+Bu sefer hem satın alanlar içinde satın almayı tahmin etme oranı arttı (Specificity) hem de satın alan tahmini içinde satın alan oranı arttı. (Neg Pred Value)
+
+## Kaynakça
+
+* O. Kramer: Dimensionality Reduction with Unsupervised Nearest Neighb., ISRL 51, pp. 13–23.
+
+* James. G, Witten, D., Hastie, T, Tibshirani, R. An Introduction to Statistical Learning with Applications in R. pp. 181-185
